@@ -38,7 +38,7 @@ public class HttpClientConfigBean {
       required = true,
       type = ConfigDef.Type.STRING,
       label = "Resource URL",
-      defaultValue = "https://stream.twitter.com/1.1/statuses/sample.json",
+      defaultValue = "https://www.streamsets.com/documentation/datacollector/sample_data/tutorial/nyc_taxi_data.csv",
       description = "Specify the streaming HTTP resource URL",
       displayPosition = 10,
       group = "HTTP"

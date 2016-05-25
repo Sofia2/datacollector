@@ -20,6 +20,22 @@
 
 package com.streamsets.pipeline.stage.origin.http;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+import javax.ws.rs.core.Response;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.streamsets.pipeline.api.BatchMaker;
 import com.streamsets.pipeline.api.ErrorCode;
 import com.streamsets.pipeline.api.OffsetCommitter;
@@ -32,20 +48,6 @@ import com.streamsets.pipeline.lib.executor.SafeScheduledExecutorService;
 import com.streamsets.pipeline.lib.parser.DataParser;
 import com.streamsets.pipeline.lib.parser.DataParserException;
 import com.streamsets.pipeline.lib.parser.DataParserFactory;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
-import javax.ws.rs.core.Response;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 public class HttpClientSource extends BaseSource implements OffsetCommitter {
   private static final Logger LOG = LoggerFactory.getLogger(HttpClientSource.class);
@@ -162,6 +164,7 @@ public class HttpClientSource extends BaseSource implements OffsetCommitter {
     if (lastResponseStatus.getFamily() == Response.Status.Family.SUCCESSFUL) {
       for (String chunk : chunks) {
         String sourceId = getOffset();
+
         try (DataParser parser = parserFactory.getParser(sourceId, chunk.getBytes(StandardCharsets.UTF_8))) {
           parseChunk(parser, batchMaker);
         } catch (IOException | DataParserException e) {
@@ -177,26 +180,41 @@ public class HttpClientSource extends BaseSource implements OffsetCommitter {
   }
 
   private void parseChunk(DataParser parser, BatchMaker batchMaker) throws IOException, DataParserException {
-    if (conf.dataFormat == DataFormat.JSON) {
-      // For JSON, a chunk only contains a single record, so we only parse it once.
-      Record record = parser.parse();
-      if (record != null) {
-        batchMaker.addRecord(record);
-        recordCount++;
-      }
-      if (null != parser.parse()) {
-        throw new DataParserException(Errors.HTTP_02);
-      }
-    } else {
-      // For text and xml, a chunk may contain multiple records.
-      Record record = parser.parse();
-      while (record != null) {
-        batchMaker.addRecord(record);
-        recordCount++;
-        record = parser.parse();
-      }
-    }
-  }
+	    if (conf.dataFormat == DataFormat.JSON) {
+	      // For JSON, a chunk only contains a single record, so we only parse it once.
+	      Record record = parser.parse();
+	      if (record != null) {
+	        batchMaker.addRecord(record);
+	        recordCount++;
+	      }
+	      if (null != parser.parse()) {
+	        throw new DataParserException(Errors.HTTP_02);
+	      }
+	    } else if (conf.dataFormat == DataFormat.DELIMITED){
+	    	// For Delimited dataformat
+	    	try{
+		    	Record record=parser.parse();
+
+		    	while (record != null) {
+		    		batchMaker.addRecord(record);
+		    	    recordCount++;
+		    	    record = parser.parse();
+		    	}
+		    }catch (Exception e){
+	            throw new DataParserException(Errors.HTTP_04);
+
+		    }
+
+	    } else {
+	      // For text and xml, a chunk may contain multiple records.
+	      Record record = parser.parse();
+	      while (record != null) {
+	        batchMaker.addRecord(record);
+	        recordCount++;
+	        record = parser.parse();
+	      }
+	    }
+	  }
 
   private void handleError(ErrorCode errorCode, Object... context) throws StageException {
     switch (getContext().getOnErrorRecord()) {

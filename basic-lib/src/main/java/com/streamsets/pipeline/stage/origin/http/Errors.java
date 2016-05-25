@@ -28,6 +28,7 @@ public enum Errors implements ErrorCode {
   HTTP_01("Error fetching resource. Status: {} Reason: {}"),
   HTTP_02("JSON parser found more than one record in chunk. Verify that the correct delimiter is configured."),
   HTTP_03("Error fetching resource. Reason: {}"),
+  HTTP_04("Cannot process delimited data"), // añadido para tratar el error producido por el dataformat delimited
   ;
 
   private final String msg;
