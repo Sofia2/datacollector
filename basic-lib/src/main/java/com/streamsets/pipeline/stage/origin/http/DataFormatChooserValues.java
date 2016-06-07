@@ -29,7 +29,7 @@ public class DataFormatChooserValues extends BaseEnumChooserValues<DataFormat> {
         DataFormat.JSON,
         DataFormat.TEXT,
         DataFormat.XML,
-        DataFormat.DELIMITED // incluido tipo delimitado
+        DataFormat.DELIMITED
     );
   }
 

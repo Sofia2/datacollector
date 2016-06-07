@@ -23,7 +23,12 @@ package com.streamsets.pipeline.stage.origin.http;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
+import java.util.Scanner;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -38,17 +43,18 @@ import org.slf4j.LoggerFactory;
 
 import com.streamsets.pipeline.api.BatchMaker;
 import com.streamsets.pipeline.api.ErrorCode;
+import com.streamsets.pipeline.api.Field;
 import com.streamsets.pipeline.api.OffsetCommitter;
 import com.streamsets.pipeline.api.Record;
 import com.streamsets.pipeline.api.StageException;
 import com.streamsets.pipeline.api.base.BaseSource;
 import com.streamsets.pipeline.api.impl.Utils;
+import com.streamsets.pipeline.config.CsvHeader;
 import com.streamsets.pipeline.config.DataFormat;
 import com.streamsets.pipeline.lib.executor.SafeScheduledExecutorService;
 import com.streamsets.pipeline.lib.parser.DataParser;
 import com.streamsets.pipeline.lib.parser.DataParserException;
 import com.streamsets.pipeline.lib.parser.DataParserFactory;
-
 public class HttpClientSource extends BaseSource implements OffsetCommitter {
   private static final Logger LOG = LoggerFactory.getLogger(HttpClientSource.class);
   private static final int SLEEP_TIME_WAITING_FOR_BATCH_SIZE_MS = 100;
@@ -66,13 +72,16 @@ public class HttpClientSource extends BaseSource implements OffsetCommitter {
 
   private BlockingQueue<String> entityQueue;
   private HttpStreamConsumer httpConsumer;
-
+  private Scanner sc;
+  boolean isNew=true;
+  List<String> cabecera;
   /**
    * @param conf Configuration object for the HTTP client
    */
   public HttpClientSource(final HttpClientConfigBean conf) {
     this.conf = conf;
   }
+  
 
   @Override
   protected List<ConfigIssue> init() {
@@ -145,7 +154,7 @@ public class HttpClientSource extends BaseSource implements OffsetCommitter {
         Thread.currentThread().interrupt();
       }
     }
-
+    
     // Check for an error and propagate to the user
     if (httpConsumer.getError().isPresent()) {
       Exception e = httpConsumer.getError().get();
@@ -161,24 +170,137 @@ public class HttpClientSource extends BaseSource implements OffsetCommitter {
     entityQueue.drainTo(chunks, chunksToFetch);
 
     Response.StatusType lastResponseStatus = httpConsumer.getLastResponseStatus();
+    
     if (lastResponseStatus.getFamily() == Response.Status.Family.SUCCESSFUL) {
-      for (String chunk : chunks) {
-        String sourceId = getOffset();
+    	
+			if (conf.dataFormat == DataFormat.DELIMITED) {
+				parseChunk(chunks, batchMaker, maxBatchSize, lastSourceOffset);
+				return getOffset();
+			}
+			for (String chunk : chunks) {
+				String sourceId = getOffset();
+				try (DataParser parser = parserFactory.getParser(sourceId,
+						chunk.getBytes(StandardCharsets.UTF_8))) {
+					parseChunk(parser, batchMaker);
+				} catch (IOException | DataParserException e) {
+					handleError(Errors.HTTP_00, sourceId, e.toString(), e);
+				}
+			}
+		} else {
+			// If http response status != 2xx
+			handleError(Errors.HTTP_01, lastResponseStatus.getStatusCode(),
+					lastResponseStatus.getReasonPhrase());
+		}
 
-        try (DataParser parser = parserFactory.getParser(sourceId, chunk.getBytes(StandardCharsets.UTF_8))) {
-          parseChunk(parser, batchMaker);
-        } catch (IOException | DataParserException e) {
-          handleError(Errors.HTTP_00, sourceId, e.toString(), e);
-        }
-      }
-    } else {
-      // If http response status != 2xx
-      handleError(Errors.HTTP_01, lastResponseStatus.getStatusCode(), lastResponseStatus.getReasonPhrase());
-    }
+		return getOffset();
+	}
 
-    return getOffset();
-  }
+	private void getScanner(String chunk) throws Exception {
+		sc = new Scanner(chunk);
+	}
+  
+	private int setNextSourceOffset(String lastSourceOffset){
+		if (lastSourceOffset==null){
+			return 0;
+		}
+		return Integer.parseInt(lastSourceOffset);
+	}
+	
+	private void firstScan(String pattern){
+		
+		if (cabecera == null) {
+			cabecera = new LinkedList<>();
+		}
+		
+		if (conf.dataFormatConfig.csvHeader.name().equalsIgnoreCase(CsvHeader.WITH_HEADER.name())) {
+			if (sc.hasNextLine()) {
+				String[] datos = sc.nextLine().split(pattern);
+				if (datos.length > 0) {
+					while (datos[0].isEmpty() && sc.hasNextLine()) {
+						datos = sc.nextLine().split(String.valueOf(conf.dataFormatConfig.csvCustomDelimiter));
+					}
+				}
+				for (String temp : datos) {
+					cabecera.add(temp);
+				}
+				recordCount++;
+			}
+		} else if (conf.dataFormatConfig.csvHeader.getLabel().equalsIgnoreCase(CsvHeader.IGNORE_HEADER.name())) {
+			if (sc.hasNextLine()) {
+				String datos = sc.nextLine();
+				while (datos.isEmpty() && sc.hasNextLine()) {
+					datos = sc.nextLine();
+				}
+			}
+			recordCount++;
+		}
+	}
+  
+	private void parseChunk(List<String> chunks, BatchMaker batchMaker,int maxBatchSize, String lastSourceOffset) {
 
+		String pattern = String.valueOf(conf.dataFormatConfig.csvCustomDelimiter);
+		Map<String, Field> map = new HashMap<String, Field>();
+		int nextSourceOffset=setNextSourceOffset(lastSourceOffset);
+
+		if (nextSourceOffset==maxBatchSize && getContext().isPreview()){
+			return;
+		}
+		
+			try {
+				for (int j=0;j<chunks.size();j++) {
+					
+					Record record = getContext().createRecord("temporal");// context.createRecord(hdfsInputPath+nextSourceOffset);
+					String chunk=chunks.get(j);
+					getScanner(chunk);
+					
+					if (j==0 && cabecera==null){
+						firstScan(pattern);
+					}
+	
+					for (int contador = 0, i = 1; sc.hasNextLine(); recordCount++, contador = 0, i++) {
+						map = new LinkedHashMap<String, Field>();
+						String[] listadoSplit = sc.nextLine().split(pattern);
+						
+						if (!cabecera.isEmpty()) {
+							try{
+								for (String temp : listadoSplit) {
+									map.put(cabecera.get(contador), Field.create(temp));
+									contador++;
+								}
+								while (cabecera.size() > contador + 1) {
+									map.put(cabecera.get(contador + 1),Field.create(""));
+									contador++;
+								}
+								record.set(Field.createListMap((LinkedHashMap<String, Field>) map));
+								batchMaker.addRecord(record);
+							} catch(Exception e){
+								getContext().toError(getContext().createRecord("error"), Errors.HTTP_00, e.toString());
+							}
+						} else {
+							for (String temp : listadoSplit) {
+								map.put(String.valueOf(contador),Field.create(temp));
+								contador++;
+							}
+							record.set(Field.createListMap((LinkedHashMap<String, Field>) map));
+							batchMaker.addRecord(record);
+						}
+	
+						if (i>=maxBatchSize && getContext().isPreview()){
+							try{
+								return;
+							}catch (Exception e){}
+						}
+					}
+				}
+			} catch (Throwable e) {
+				getContext().toError(getContext().createRecord("error"), Errors.HTTP_00, e.toString());
+			} finally{
+				isNew=false;
+				if (sc!=null){
+					sc.close();
+				}
+			}
+	}
   private void parseChunk(DataParser parser, BatchMaker batchMaker) throws IOException, DataParserException {
 	    if (conf.dataFormat == DataFormat.JSON) {
 	      // For JSON, a chunk only contains a single record, so we only parse it once.
@@ -190,21 +312,6 @@ public class HttpClientSource extends BaseSource implements OffsetCommitter {
 	      if (null != parser.parse()) {
 	        throw new DataParserException(Errors.HTTP_02);
 	      }
-	    } else if (conf.dataFormat == DataFormat.DELIMITED){
-	    	// For Delimited dataformat
-	    	try{
-		    	Record record=parser.parse();
-
-		    	while (record != null) {
-		    		batchMaker.addRecord(record);
-		    	    recordCount++;
-		    	    record = parser.parse();
-		    	}
-		    }catch (Exception e){
-	            throw new DataParserException(Errors.HTTP_04);
-
-		    }
-
 	    } else {
 	      // For text and xml, a chunk may contain multiple records.
 	      Record record = parser.parse();
